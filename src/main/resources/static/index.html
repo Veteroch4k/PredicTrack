@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Logistics AI Command Center</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+
+    <style>
+        body { background-color: #f8f9fa; height: 100vh; overflow: hidden; }
+        #map { height: 100vh; width: 100%; }
+        .sidebar { height: 100vh; overflow-y: auto; background: white; padding: 20px; box-shadow: 2px 0 5px rgba(0,0,0,0.1); z-index: 1000; position: relative; }
+        .result-card { background: #212529; color: white; border-radius: 10px; padding: 15px; margin-top: 20px; display: none; }
+        .metric-value { font-size: 1.5rem; font-weight: bold; color: #0d6efd; }
+        .delay-value { font-size: 1.5rem; font-weight: bold; color: #dc3545; }
+        .total-value { font-size: 1.8rem; font-weight: bold; color: #198754; }
+    </style>
+</head>
+<body>
+
+<div class="container-fluid p-0">
+    <div class="row g-0">
+        <div class="col-md-4 col-lg-3 sidebar">
+            <h4 class="mb-4">Logistics Prediction</h4>
+
+            <form id="predictionForm">
+                <div class="mb-3">
+                    <label class="form-label">Точка А (Отправление)</label>
+                    <select id="startPoint" class="form-select">
+                        <option value="28.61,77.20">Нью-Дели (Склад)</option>
+                        <option value="19.07,72.87">Мумбаи (Порт)</option>
+                    </select>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Точка Б (Назначение)</label>
+                    <select id="endPoint" class="form-select">
+                        <option value="27.17,78.00">Агра (Завод)</option>
+                        <option value="21.14,79.08">Нагпур (Хаб)</option>
+                    </select>
+                </div>
+
+                <hr>
+
+                <div class="mb-3">
+                    <label class="form-label">🚦 Пробки (Traffic Index): <span id="trafficVal">1.0</span></label>
+                    <input type="range" class="form-range" id="traffic" min="1.0" max="3.0" step="0.1" value="1.0" oninput="document.getElementById('trafficVal').innerText = this.value">
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">⛈ Погода</label>
+                    <select id="weather" class="form-select">
+                        <option value="0.0">☀️ Ясно (0.0)</option>
+                        <option value="1.0">🌧 Муссон / Шторм (1.0)</option>
+                    </select>
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">🕒 Час выезда: <span id="hourVal">12:00</span></label>
+                    <input type="range" class="form-range" id="hour" min="0" max="23" step="1" value="12" oninput="document.getElementById('hourVal').innerText = this.value + ':00'">
+                </div>
+
+                <div class="mb-3">
+                    <label class="form-label">📦 Тип груза</label>
+                    <select id="isFtl" class="form-select">
+                        <option value="1.0">Полная фура (FTL)</option>
+                        <option value="0.0">Сборный груз (LTL)</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn btn-primary w-100 btn-lg mt-2">Рассчитать маршрут</button>
+            </form>
+
+            <div id="resultBox" class="result-card">
+                <h5>Анализ рейса</h5>
+                <hr class="border-secondary">
+                <div class="mb-2">Дистанция: <br><span class="metric-value" id="resDistance">-</span></div>
+                <div class="mb-2">Базовое время (OSRM): <br><span class="metric-value" id="resOsrm">-</span></div>
+                <div class="mb-2">Прогноз задержки: <br><span class="delay-value" id="resDelay">-</span></div>
+                <hr class="border-secondary">
+                <div>🏁 Расчетное ETA: <br><span class="total-value" id="resTotal">-</span></div>
+            </div>
+        </div>
+
+        <div class="col-md-8 col-lg-9">
+            <div id="map"></div>
+        </div>
+    </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    const map = L.map('map').setView([22.5, 78.5], 5);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        attribution: '© OpenStreetMap contributors'
+    }).addTo(map);
+
+    let routeLayer = null;
+    let markers = [];
+
+    document.getElementById('predictionForm').addEventListener('submit', async function(e) {
+        e.preventDefault();
+
+        const startCoords = document.getElementById('startPoint').value.split(',');
+        const endCoords = document.getElementById('endPoint').value.split(',');
+
+        const startLat = startCoords[0], startLon = startCoords[1];
+        const endLat = endCoords[0], endLon = endCoords[1];
+
+        const traffic = document.getElementById('traffic').value;
+        const weather = document.getElementById('weather').value;
+        const hour = document.getElementById('hour').value;
+        const isFtl = document.getElementById('isFtl').value;
+
+        updateMarkers(startLat, startLon, endLat, endLon);
+
+        const url = `/api/v1/trips/predict?startLat=${startLat}&startLon=${startLon}&endLat=${endLat}&endLon=${endLon}&traffic=${traffic}&weather=${weather}&hour=${hour}&isFtl=${isFtl}`;
+
+        try {
+            const response = await fetch(url);
+            const data = await response.json();
+
+            if(data.error) {
+                alert(data.error);
+                return;
+            }
+
+            if (routeLayer) map.removeLayer(routeLayer);
+
+            routeLayer = L.geoJSON(data.geometry, {
+                style: { color: '#0d6efd', weight: 5, opacity: 0.8 }
+            }).addTo(map);
+
+            map.fitBounds(routeLayer.getBounds(), {padding: [50, 50]});
+
+            document.getElementById('resultBox').style.display = 'block';
+            document.getElementById('resDistance').innerText = data.distance.toFixed(2) + ' км';
+            document.getElementById('resOsrm').innerText = Math.round(data.osrmTime) + ' мин';
+            document.getElementById('resDelay').innerText = '+ ' + Math.round(data.delay) + ' мин';
+            document.getElementById('resTotal').innerText = Math.round(data.totalTime) + ' мин';
+
+        } catch (error) {
+            console.error('Ошибка:', error);
+            alert('Ошибка соединения с сервером');
+        }
+    });
+
+    function updateMarkers(lat1, lon1, lat2, lon2) {
+        markers.forEach(m => map.removeLayer(m));
+        markers = [];
+        markers.push(L.marker([lat1, lon1]).addTo(map).bindPopup('Отправление'));
+        markers.push(L.marker([lat2, lon2]).addTo(map).bindPopup('Назначение'));
+    }
+</script>
+</body>
+</html>
